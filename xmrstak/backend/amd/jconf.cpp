@@ -21,10 +21,9 @@
   *
   */
 
-
 #include "jconf.hpp"
-#include "xmrstak/misc/jext.hpp"
 #include "xmrstak/misc/console.hpp"
+#include "xmrstak/misc/jext.hpp"
 
 #ifdef _WIN32
 #define strcasecmp _stricmp
@@ -37,7 +36,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-
 namespace xmrstak
 {
 namespace amd
@@ -48,25 +46,47 @@ using namespace rapidjson;
 /*
  * This enum needs to match index in oConfigValues, otherwise we will get a runtime error
  */
-enum configEnum { aGpuThreadsConf, iPlatformIdx };
+enum configEnum
+{
+	aGpuThreadsConf,
+	iPlatformIdx
+};
 
-struct configVal {
+struct configVal
+{
 	configEnum iName;
 	const char* sName;
 	Type iType;
 };
 
-//Same order as in configEnum, as per comment above
+// Same order as in configEnum, as per comment above
+// kNullType means any type
 configVal oConfigValues[] = {
-	{ aGpuThreadsConf, "gpu_threads_conf", kArrayType },
-	{ iPlatformIdx, "platform_index", kNumberType }
+	{aGpuThreadsConf, "gpu_threads_conf", kNullType},
+	{iPlatformIdx, "platform_index", kNumberType}};
+
+constexpr size_t iConfigCnt = (sizeof(oConfigValues) / sizeof(oConfigValues[0]));
+
+enum optionalConfigEnum
+{
+	iAutoTune
 };
 
-constexpr size_t iConfigCnt = (sizeof(oConfigValues)/sizeof(oConfigValues[0]));
+struct optionalConfigVal
+{
+	optionalConfigEnum iName;
+	const char* sName;
+	Type iType;
+};
+
+optionalConfigVal oOptionalConfigValues[] = {
+	{iAutoTune, "auto_tune", kNumberType}};
 
 inline bool checkType(Type have, Type want)
 {
 	if(want == have)
+		return true;
+	else if(want == kNullType)
 		return true;
 	else if(want == kTrueType && have == kFalseType)
 		return true;
@@ -93,7 +113,7 @@ jconf::jconf()
 	prv = new opaque_private();
 }
 
-bool jconf::GetThreadConfig(size_t id, thd_cfg &cfg)
+bool jconf::GetThreadConfig(size_t id, thd_cfg& cfg)
 {
 	if(id >= prv->configValues[aGpuThreadsConf]->Size())
 		return false;
@@ -103,15 +123,39 @@ bool jconf::GetThreadConfig(size_t id, thd_cfg &cfg)
 	if(!oThdConf.IsObject())
 		return false;
 
-	const Value *idx, *intensity, *w_size, *aff, *stridedIndex;
+	const Value *idx, *intensity, *w_size, *aff, *stridedIndex, *memChunk, *unroll, *compMode, *interleave;
 	idx = GetObjectMember(oThdConf, "index");
 	intensity = GetObjectMember(oThdConf, "intensity");
 	w_size = GetObjectMember(oThdConf, "worksize");
 	aff = GetObjectMember(oThdConf, "affine_to_cpu");
 	stridedIndex = GetObjectMember(oThdConf, "strided_index");
+	memChunk = GetObjectMember(oThdConf, "mem_chunk");
+	unroll = GetObjectMember(oThdConf, "unroll");
+	compMode = GetObjectMember(oThdConf, "comp_mode");
+	interleave = GetObjectMember(oThdConf, "interleave");
 
-	if(idx == nullptr || intensity == nullptr || w_size == nullptr || aff == nullptr || stridedIndex == nullptr)
+	if(idx == nullptr || intensity == nullptr || w_size == nullptr || aff == nullptr || memChunk == nullptr ||
+		stridedIndex == nullptr || unroll == nullptr || compMode == nullptr)
 		return false;
+
+	// interleave is optional
+	if(interleave != nullptr)
+	{
+		if(!interleave->IsInt())
+		{
+			printer::inst()->print_msg(L0, "ERROR: interleave must be a number");
+			return false;
+		}
+		else if(interleave->GetInt() < 0 || interleave->GetInt() > 100)
+		{
+			printer::inst()->print_msg(L0, "ERROR: interleave must be in range [0;100]");
+			return false;
+		}
+		else
+		{
+			cfg.interleave = interleave->GetInt();
+		}
+	}
 
 	if(!idx->IsUint64() || !intensity->IsUint64() || !w_size->IsUint64())
 		return false;
@@ -119,13 +163,45 @@ bool jconf::GetThreadConfig(size_t id, thd_cfg &cfg)
 	if(!aff->IsUint64() && !aff->IsBool())
 		return false;
 
-	if(!stridedIndex->IsBool())
+	if(!stridedIndex->IsBool() && !stridedIndex->IsNumber())
+	{
+		printer::inst()->print_msg(L0, "ERROR: strided_index must be a bool or a number");
+		return false;
+	}
+
+	if(stridedIndex->IsBool())
+		cfg.stridedIndex = stridedIndex->GetBool() ? 1 : 0;
+	else
+		cfg.stridedIndex = (int)stridedIndex->GetInt64();
+
+	if(cfg.stridedIndex > 3)
+	{
+		printer::inst()->print_msg(L0, "ERROR: strided_index must be smaller than 3");
+		return false;
+	}
+
+	if(!memChunk->IsUint64() || (int)memChunk->GetInt64() > 18)
+	{
+		printer::inst()->print_msg(L0, "ERROR: mem_chunk must be smaller than 18");
+		return false;
+	}
+
+	cfg.memChunk = (int)memChunk->GetInt64();
+
+	if(!unroll->IsUint64() || (int)unroll->GetInt64() >= 128 || (int)unroll->GetInt64() == 0)
+	{
+		printer::inst()->print_msg(L0, "ERROR: unroll must be smaller than 128 and not zero");
+		return false;
+	}
+	cfg.unroll = (int)unroll->GetInt64();
+
+	if(!compMode->IsBool())
 		return false;
 
 	cfg.index = idx->GetUint64();
-	cfg.intensity = intensity->GetUint64();
 	cfg.w_size = w_size->GetUint64();
-	cfg.stridedIndex = stridedIndex->GetBool();
+	cfg.intensity = intensity->GetUint64();
+	cfg.compMode = compMode->GetBool();
 
 	if(aff->IsNumber())
 		cfg.cpu_aff = aff->GetInt64();
@@ -140,6 +216,20 @@ size_t jconf::GetPlatformIdx()
 	return prv->configValues[iPlatformIdx]->GetUint64();
 }
 
+size_t jconf::GetAutoTune()
+{
+	const Value* value = GetObjectMember(prv->jsonDoc, oOptionalConfigValues[iAutoTune].sName);
+	if(value != nullptr && value->IsUint64())
+	{
+		return value->GetUint64();
+	}
+	else
+	{
+		printer::inst()->print_msg(L0, "WARNING: OpenCL optional option 'auto-tune' not available");
+	}
+	return 0;
+}
+
 size_t jconf::GetThreadCount()
 {
 	return prv->configValues[aGpuThreadsConf]->Size();
@@ -147,22 +237,22 @@ size_t jconf::GetThreadCount()
 
 bool jconf::parse_config(const char* sFilename)
 {
-	FILE * pFile;
-	char * buffer;
+	FILE* pFile;
+	char* buffer;
 	size_t flen;
 
 	pFile = fopen(sFilename, "rb");
-	if (pFile == NULL)
+	if(pFile == NULL)
 	{
 		printer::inst()->print_msg(L0, "Failed to open config file %s.", sFilename);
 		return false;
 	}
 
-	fseek(pFile,0,SEEK_END);
+	fseek(pFile, 0, SEEK_END);
 	flen = ftell(pFile);
 	rewind(pFile);
 
-	if(flen >= 64*1024)
+	if(flen >= 64 * 1024)
 	{
 		fclose(pFile);
 		printer::inst()->print_msg(L0, "Oversized config file - %s.", sFilename);
@@ -176,7 +266,7 @@ bool jconf::parse_config(const char* sFilename)
 	}
 
 	buffer = (char*)malloc(flen + 3);
-	if(fread(buffer+1, flen, 1, pFile) != 1)
+	if(fread(buffer + 1, flen, 1, pFile) != 1)
 	{
 		free(buffer);
 		fclose(pFile);
@@ -198,20 +288,19 @@ bool jconf::parse_config(const char* sFilename)
 	buffer[flen] = '}';
 	buffer[flen + 1] = '\0';
 
-	prv->jsonDoc.Parse<kParseCommentsFlag|kParseTrailingCommasFlag>(buffer, flen+2);
+	prv->jsonDoc.Parse<kParseCommentsFlag | kParseTrailingCommasFlag>(buffer, flen + 2);
 	free(buffer);
 
 	if(prv->jsonDoc.HasParseError())
 	{
-		printer::inst()->print_msg(L0, "JSON config parse error(offset %llu): %s",
-			int_port(prv->jsonDoc.GetErrorOffset()), GetParseError_En(prv->jsonDoc.GetParseError()));
+		printer::inst()->print_msg(L0, "JSON config parse error in '%s' (offset %llu): %s",
+			sFilename, int_port(prv->jsonDoc.GetErrorOffset()), GetParseError_En(prv->jsonDoc.GetParseError()));
 		return false;
 	}
 
-
 	if(!prv->jsonDoc.IsObject())
 	{ //This should never happen as we created the root ourselves
-		printer::inst()->print_msg(L0, "Invalid config file. No root?\n");
+		printer::inst()->print_msg(L0, "Invalid config file '%s'. No root?", sFilename);
 		return false;
 	}
 
@@ -227,20 +316,20 @@ bool jconf::parse_config(const char* sFilename)
 
 		if(prv->configValues[i] == nullptr)
 		{
-			printer::inst()->print_msg(L0, "Invalid config file. Missing value \"%s\".", oConfigValues[i].sName);
+			printer::inst()->print_msg(L0, "Invalid config file '%s'. Missing value \"%s\".", sFilename, oConfigValues[i].sName);
 			return false;
 		}
 
 		if(!checkType(prv->configValues[i]->GetType(), oConfigValues[i].iType))
 		{
-			printer::inst()->print_msg(L0, "Invalid config file. Value \"%s\" has unexpected type.", oConfigValues[i].sName);
+			printer::inst()->print_msg(L0, "Invalid config file '%s'. Value \"%s\" has unexpected type.", sFilename, oConfigValues[i].sName);
 			return false;
 		}
 	}
 
 	size_t n_thd = prv->configValues[aGpuThreadsConf]->Size();
 	thd_cfg c;
-	for(size_t i=0; i < n_thd; i++)
+	for(size_t i = 0; i < n_thd; i++)
 	{
 		if(!GetThreadConfig(i, c))
 		{

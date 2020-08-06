@@ -21,16 +21,17 @@
   *
   */
 
-#include <stdarg.h>
-#include <assert.h>
 #include <algorithm>
+#include <assert.h>
+#include <chrono>
+#include <stdarg.h>
 
 #include "jpsock.hpp"
-#include "socks.hpp"
 #include "socket.hpp"
+#include "socks.hpp"
 
-#include "xmrstak/misc/executor.hpp"
 #include "xmrstak/jconf.hpp"
+#include "xmrstak/misc/executor.hpp"
 #include "xmrstak/misc/jext.hpp"
 #include "xmrstak/version.hpp"
 
@@ -42,8 +43,11 @@ struct jpsock::call_rsp
 	uint64_t iCallId;
 	Value* pCallData;
 	std::string sCallErr;
+	uint64_t iMessageId;
 
-	call_rsp(Value* val) : pCallData(val)
+	call_rsp(Value* val) :
+		pCallData(val),
+		iMessageId(0)
 	{
 		bHaveResponse = false;
 		iCallId = 0;
@@ -68,7 +72,7 @@ typedef GenericDocument<UTF8<>, MemoryPoolAllocator<>, MemoryPoolAllocator<>> Me
 
 struct jpsock::opaque_private
 {
-	Value  oCallValue;
+	Value oCallValue;
 
 	MemoryPoolAllocator<> callAllocator;
 	MemoryPoolAllocator<> recvAllocator;
@@ -89,12 +93,24 @@ struct jpsock::opaque_private
 struct jpsock::opq_json_val
 {
 	const Value* val;
-	opq_json_val(const Value* val) : val(val) {}
+	opq_json_val(const Value* val) :
+		val(val) {}
 };
 
-jpsock::jpsock(size_t id, const char* sAddr, const char* sLogin, const char* sPassword, double pool_weight, bool dev_pool, bool tls, const char* tls_fp, bool nicehash) :
-	net_addr(sAddr), usr_login(sLogin), usr_pass(sPassword), tls_fp(tls_fp), pool_id(id), pool_weight(pool_weight), pool(dev_pool), nicehash(nicehash),
-	connect_time(0), connect_attempts(0), disconnect_time(0), quiet_close(false)
+jpsock::jpsock(size_t id, const char* sAddr, const char* sLogin, const char* sRigId, const char* sPassword, double pool_weight, bool dev_pool, bool tls, const char* tls_fp, bool nicehash) :
+	net_addr(sAddr),
+	usr_login(sLogin),
+	usr_rigid(sRigId),
+	usr_pass(sPassword),
+	tls_fp(tls_fp),
+	pool_id(id),
+	pool_weight(pool_weight),
+	pool(dev_pool),
+	nicehash(nicehash),
+	connect_time(0),
+	connect_attempts(0),
+	disconnect_time(0),
+	quiet_close(false)
 {
 	sock_init();
 
@@ -133,6 +149,7 @@ jpsock::~jpsock()
 
 std::string&& jpsock::get_call_error()
 {
+	call_error = false;
 	return std::move(prv->oCallRsp.sCallErr);
 }
 
@@ -189,16 +206,31 @@ bool jpsock::set_socket_error_strerr(const char* a, int res)
 void jpsock::jpsock_thread()
 {
 	jpsock_thd_main();
+
+	if(!bHaveSocketError)
+		set_socket_error("Socket closed.");
+
 	executor::inst()->push_event(ex_event(std::move(sSocketError), quiet_close, pool_id));
 
-	// If a call is wating, send an error to end it
-	bool bCallWaiting = false;
 	std::unique_lock<std::mutex> mlock(call_mutex);
+	bool bWait = prv->oCallRsp.pCallData != nullptr;
+
+	// If a call is waiting, wait a little bit before blowing it out of the water
+	if(bWait)
+	{
+		mlock.unlock();
+		std::this_thread::sleep_for(std::chrono::milliseconds(500));
+		mlock.lock();
+	}
+
+	// If the call is still there send an error to end it
+	bool bCallWaiting = false;
 	if(prv->oCallRsp.pCallData != nullptr)
 	{
 		prv->oCallRsp.bHaveResponse = true;
 		prv->oCallRsp.iCallId = 0;
 		prv->oCallRsp.pCallData = nullptr;
+		prv->oCallRsp.iMessageId = 0;
 		bCallWaiting = true;
 	}
 	mlock.unlock();
@@ -213,7 +245,7 @@ void jpsock::jpsock_thread()
 	else
 		disconnect_time = 0;
 
-	std::unique_lock<std::mutex>(job_mutex);
+	std::unique_lock<std::mutex> lck(job_mutex);
 	memset(&oCurrentJob, 0, sizeof(oCurrentJob));
 	bRunning = false;
 }
@@ -227,7 +259,7 @@ bool jpsock::jpsock_thd_main()
 
 	char buf[iSockBufferSize];
 	size_t datalen = 0;
-	while (true)
+	while(true)
 	{
 		int ret = sck->recv(buf + datalen, sizeof(buf) - datalen);
 
@@ -236,7 +268,7 @@ bool jpsock::jpsock_thd_main()
 
 		datalen += ret;
 
-		if (datalen >= sizeof(buf))
+		if(datalen >= sizeof(buf))
 		{
 			sck->close(false);
 			return set_socket_error("RECEIVE error: data overflow");
@@ -244,12 +276,12 @@ bool jpsock::jpsock_thd_main()
 
 		char* lnend;
 		char* lnstart = buf;
-		while ((lnend = (char*)memchr(lnstart, '\n', datalen)) != nullptr)
+		while((lnend = (char*)memchr(lnstart, '\n', datalen)) != nullptr)
 		{
 			lnend++;
 			int lnlen = lnend - lnstart;
 
-			if (!process_line(lnstart, lnlen))
+			if(!process_line(lnstart, lnlen))
 			{
 				sck->close(false);
 				return false;
@@ -260,7 +292,7 @@ bool jpsock::jpsock_thd_main()
 		}
 
 		//Got leftover data? Move it to the front
-		if (datalen > 0 && buf != lnstart)
+		if(datalen > 0 && buf != lnstart)
 			memmove(buf, lnstart, datalen);
 	}
 }
@@ -270,25 +302,32 @@ bool jpsock::process_line(char* line, size_t len)
 	prv->jsonDoc.SetNull();
 	prv->parseAllocator.Clear();
 	prv->callAllocator.Clear();
+	++iMessageCnt;
 
 	/*NULL terminate the line instead of '\n', parsing will add some more NULLs*/
-	line[len-1] = '\0';
+	line[len - 1] = '\0';
 
 	//printf("RECV: %s\n", line);
 
-	if (prv->jsonDoc.ParseInsitu(line).HasParseError())
+	if(prv->jsonDoc.ParseInsitu(line).HasParseError())
 		return set_socket_error("PARSE error: Invalid JSON");
 
-	if (!prv->jsonDoc.IsObject())
+	if(!prv->jsonDoc.IsObject())
 		return set_socket_error("PARSE error: Invalid root");
 
 	const Value* mt;
-	if (prv->jsonDoc.HasMember("method"))
+	if(prv->jsonDoc.HasMember("method"))
 	{
 		mt = GetObjectMember(prv->jsonDoc, "method");
 
 		if(!mt->IsString())
 			return set_socket_error("PARSE error: Protocol error 1");
+
+		if(strcmp(mt->GetString(), "mining.set_extranonce") == 0)
+		{
+			printer::inst()->print_msg(L0, "Detected buggy NiceHash pool code. Workaround engaged.");
+			return true;
+		}
 
 		if(strcmp(mt->GetString(), "job") != 0)
 			return set_socket_error("PARSE error: Unsupported server method ", mt->GetString());
@@ -298,13 +337,13 @@ bool jpsock::process_line(char* line, size_t len)
 			return set_socket_error("PARSE error: Protocol error 2");
 
 		opq_json_val v(mt);
-		return process_pool_job(&v);
+		return process_pool_job(&v, iMessageCnt);
 	}
 	else
 	{
 		uint64_t iCallId;
 		mt = GetObjectMember(prv->jsonDoc, "id");
-		if (mt == nullptr || !mt->IsUint64())
+		if(mt == nullptr || !mt->IsUint64())
 			return set_socket_error("PARSE error: Protocol error 3");
 
 		iCallId = mt->GetUint64();
@@ -312,11 +351,11 @@ bool jpsock::process_line(char* line, size_t len)
 		mt = GetObjectMember(prv->jsonDoc, "error");
 
 		const char* sError = nullptr;
-		size_t iErrorLn = 0;
-		if (mt == nullptr || mt->IsNull())
+		size_t iErrorLen = 0;
+		if(mt == nullptr || mt->IsNull())
 		{
 			/* If there was no error we need a result */
-			if ((mt = GetObjectMember(prv->jsonDoc, "result")) == nullptr)
+			if((mt = GetObjectMember(prv->jsonDoc, "result")) == nullptr)
 				return set_socket_error("PARSE error: Protocol error 7");
 		}
 		else
@@ -329,12 +368,12 @@ bool jpsock::process_line(char* line, size_t len)
 			if(msg == nullptr || !msg->IsString())
 				return set_socket_error("PARSE error: Protocol error 6");
 
-			iErrorLn = msg->GetStringLength();
+			iErrorLen = msg->GetStringLength();
 			sError = msg->GetString();
 		}
 
 		std::unique_lock<std::mutex> mlock(call_mutex);
-		if (prv->oCallRsp.pCallData == nullptr)
+		if(prv->oCallRsp.pCallData == nullptr)
 		{
 			/*Server sent us a call reply without us making a call*/
 			mlock.unlock();
@@ -343,11 +382,13 @@ bool jpsock::process_line(char* line, size_t len)
 
 		prv->oCallRsp.bHaveResponse = true;
 		prv->oCallRsp.iCallId = iCallId;
+		prv->oCallRsp.iMessageId = iMessageCnt;
 
 		if(sError != nullptr)
 		{
 			prv->oCallRsp.pCallData = nullptr;
-			prv->oCallRsp.sCallErr.assign(sError, iErrorLn);
+			prv->oCallRsp.sCallErr.assign(sError, iErrorLen);
+			call_error = true;
 		}
 		else
 			prv->oCallRsp.pCallData->CopyFrom(*mt, prv->callAllocator);
@@ -359,35 +400,73 @@ bool jpsock::process_line(char* line, size_t len)
 	}
 }
 
-bool jpsock::process_pool_job(const opq_json_val* params)
+bool jpsock::process_pool_job(const opq_json_val* params, const uint64_t messageId)
 {
-	if (!params->val->IsObject())
+	std::unique_lock<std::mutex> mlock(job_mutex);
+	if(messageId < iLastMessageId)
+	{
+		/* In the case where the processed job message id is lesser than the last
+		 * processed job message id we skip the processing to avoid mining old jobs
+		 */
+		return true;
+	}
+	iLastMessageId = messageId;
+
+	mlock.unlock();
+
+	if(!params->val->IsObject())
 		return set_socket_error("PARSE error: Job error 1");
 
-	const Value *blob, *jobid, *target, *motd;
+	const Value *blob, *jobid, *target, *motd, *blk_height;
 	jobid = GetObjectMember(*params->val, "job_id");
 	blob = GetObjectMember(*params->val, "blob");
 	target = GetObjectMember(*params->val, "target");
 	motd = GetObjectMember(*params->val, "motd");
+	blk_height = GetObjectMember(*params->val, "height");
 
-	if (jobid == nullptr || blob == nullptr || target == nullptr ||
+	if(jobid == nullptr || blob == nullptr || target == nullptr ||
 		!jobid->IsString() || !blob->IsString() || !target->IsString())
 	{
 		return set_socket_error("PARSE error: Job error 2");
 	}
 
-	if (jobid->GetStringLength() >= sizeof(pool_job::sJobID)) // Note >=
+	if(motd != nullptr && motd->IsString() && (motd->GetStringLength() & 0x01) == 0)
+	{
+		std::unique_lock<std::mutex> lck(motd_mutex);
+		if(motd->GetStringLength() > 0)
+		{
+			pool_motd.resize(motd->GetStringLength() / 2 + 1);
+			if(!hex2bin(motd->GetString(), motd->GetStringLength(), (unsigned char*)&pool_motd.front()))
+				pool_motd.clear();
+		}
+		else
+			pool_motd.clear();
+	}
+
+	if(jobid->GetStringLength() >= sizeof(pool_job::sJobID)) // Note >=
 		return set_socket_error("PARSE error: Job error 3");
 
-	uint32_t iWorkLn = blob->GetStringLength() / 2;
-	if (iWorkLn > sizeof(pool_job::bWorkBlob))
-		return set_socket_error("PARSE error: Invalid job legth. Are you sure you are mining the correct coin?");
-
 	pool_job oPoolJob;
-	if (!hex2bin(blob->GetString(), iWorkLn * 2, oPoolJob.bWorkBlob))
+
+	const uint32_t iWorkLen = blob->GetStringLength() / 2;
+	oPoolJob.iWorkLen = iWorkLen;
+
+	if(iWorkLen > sizeof(pool_job::bWorkBlob))
+		return set_socket_error("PARSE error: Invalid job length. Are you sure you are mining the correct coin?");
+
+	if(!hex2bin(blob->GetString(), iWorkLen * 2, oPoolJob.bWorkBlob))
 		return set_socket_error("PARSE error: Job error 4");
 
-	oPoolJob.iWorkLen = iWorkLn;
+	// lock reading of oCurrentJob
+	std::unique_lock<std::mutex> jobIdLock(job_mutex);
+	// compare possible non equal length job id's
+	if(iWorkLen == oCurrentJob.iWorkLen && memcmp(oPoolJob.bWorkBlob, oCurrentJob.bWorkBlob, iWorkLen) == 0 &&
+		strcmp(jobid->GetString(), oCurrentJob.sJobID) == 0)
+	{
+		return set_socket_error("Duplicate equal job detected! Please contact your pool admin.");
+	}
+	jobIdLock.unlock();
+
 	memset(oPoolJob.sJobID, 0, sizeof(pool_job::sJobID));
 	memcpy(oPoolJob.sJobID, jobid->GetString(), jobid->GetStringLength()); //Bounds checking at proto error 3
 
@@ -400,7 +479,6 @@ bool jpsock::process_pool_job(const opq_json_val* params)
 		if(!hex2bin(sTempStr, 8, (unsigned char*)&iTempInt) || iTempInt == 0)
 			return set_socket_error("PARSE error: Invalid target");
 
-		
 		oPoolJob.iTarget = t32_to_t64(iTempInt);
 	}
 	else if(target_slen <= 16)
@@ -414,25 +492,17 @@ bool jpsock::process_pool_job(const opq_json_val* params)
 	else
 		return set_socket_error("PARSE error: Job error 5");
 
-	if(motd != nullptr && motd->IsString() && (motd->GetStringLength() & 0x01) == 0)
-	{
-		std::unique_lock<std::mutex>(motd_mutex);
-		if(motd->GetStringLength() > 0)
-		{
-			pool_motd.resize(motd->GetStringLength()/2 + 1);
-			if(!hex2bin(motd->GetString(), motd->GetStringLength(), (unsigned char*)&pool_motd.front()))
-				pool_motd.clear();
-		}
-		else
-			pool_motd.clear();
-	}
-
 	iJobDiff = t64_to_diff(oPoolJob.iTarget);
 
+	if(blk_height != nullptr && blk_height->IsUint64())
+		oPoolJob.iBlockHeight = bswap_64(blk_height->GetUint64());
+
+	std::unique_lock<std::mutex> lck(job_mutex);
+	oCurrentJob = oPoolJob;
+	lck.unlock();
+	// send event after current job data are updated
 	executor::inst()->push_event(ex_event(oPoolJob, pool_id));
 
-	std::unique_lock<std::mutex>(job_mutex);
-	oCurrentJob = oPoolJob;
 	return true;
 }
 
@@ -440,6 +510,7 @@ bool jpsock::connect(std::string& sConnectError)
 {
 	ext_algo = ext_backend = ext_hashcount = ext_motd = false;
 	bHaveSocketError = false;
+	call_error = false;
 	sSocketError.clear();
 	iJobDiff = 0;
 	connect_attempts++;
@@ -474,7 +545,7 @@ void jpsock::disconnect(bool quiet)
 	quiet_close = false;
 }
 
-bool jpsock::cmd_ret_wait(const char* sPacket, opq_json_val& poResult)
+bool jpsock::cmd_ret_wait(const char* sPacket, opq_json_val& poResult, uint64_t& messageId)
 {
 	//printf("SEND: %s\n", sPacket);
 
@@ -514,8 +585,10 @@ bool jpsock::cmd_ret_wait(const char* sPacket, opq_json_val& poResult)
 	}
 
 	if(bSuccess)
+	{
 		poResult.val = &prv->oCallValue;
-
+		messageId = prv->oCallRsp.iMessageId;
+	}
 	return bSuccess;
 }
 
@@ -523,16 +596,17 @@ bool jpsock::cmd_login()
 {
 	char cmd_buffer[1024];
 
-	snprintf(cmd_buffer, sizeof(cmd_buffer), "{\"method\":\"login\",\"params\":{\"login\":\"%s\",\"pass\":\"%s\",\"agent\":\"%s\"},\"id\":1}\n",
-		usr_login.c_str(), usr_pass.c_str(), get_version_str().c_str());
+	snprintf(cmd_buffer, sizeof(cmd_buffer), "{\"method\":\"login\",\"params\":{\"login\":\"%s\",\"pass\":\"%s\",\"rigid\":\"%s\",\"agent\":\"%s\"},\"id\":1}\n",
+		usr_login.c_str(), usr_pass.c_str(), usr_rigid.c_str(), get_version_str().c_str());
 
 	opq_json_val oResult(nullptr);
+	uint64_t messageId = 0;
 
 	/*Normal error conditions (failed login etc..) will end here*/
-	if (!cmd_ret_wait(cmd_buffer, oResult))
+	if(!cmd_ret_wait(cmd_buffer, oResult, messageId))
 		return false;
 
-	if (!oResult.val->IsObject())
+	if(!oResult.val->IsObject())
 	{
 		set_socket_error("PARSE error: Login protocol error 1");
 		disconnect();
@@ -543,14 +617,14 @@ bool jpsock::cmd_login()
 	const Value* job = GetObjectMember(*oResult.val, "job");
 	const Value* ext = GetObjectMember(*oResult.val, "extensions");
 
-	if (id == nullptr || job == nullptr || !id->IsString())
+	if(id == nullptr || job == nullptr || !id->IsString())
 	{
 		set_socket_error("PARSE error: Login protocol error 2");
 		disconnect();
 		return false;
 	}
 
-	if (id->GetStringLength() >= sizeof(sMinerId))
+	if(id->GetStringLength() >= sizeof(sMinerId))
 	{
 		set_socket_error("PARSE error: Login protocol error 3");
 		disconnect();
@@ -562,10 +636,10 @@ bool jpsock::cmd_login()
 
 	if(ext != nullptr && ext->IsArray())
 	{
-		for(size_t i=0; i < ext->Size(); i++)
+		for(size_t i = 0; i < ext->Size(); i++)
 		{
 			const Value& jextname = ext->GetArray()[i];
-			
+
 			if(!jextname.IsString())
 				continue;
 
@@ -584,7 +658,7 @@ bool jpsock::cmd_login()
 	}
 
 	opq_json_val v(job);
-	if(!process_pool_job(&v))
+	if(!process_pool_job(&v, messageId))
 	{
 		disconnect();
 		return false;
@@ -596,24 +670,35 @@ bool jpsock::cmd_login()
 	return true;
 }
 
-bool jpsock::cmd_submit(const char* sJobId, uint32_t iNonce, const uint8_t* bResult, xmrstak::iBackend* bend, bool algo_full_cn)
+bool jpsock::cmd_submit(const char* sJobId, uint32_t iNonce, const uint8_t* bResult, const char* backend_name, uint64_t backend_hashcount, uint64_t total_hashcount, const xmrstak_algo& algo)
 {
 	char cmd_buffer[1024];
 	char sNonce[9];
 	char sResult[65];
 	/*Extensions*/
 	char sAlgo[64] = {0};
+	char sBaseAlgo[64] = {0};
+	char sIterations[32] = {0};
+	char sMemory[32] = {0};
+	char sMemAlignBytes[32] = {0};
 	char sBackend[64] = {0};
-	char sHashcount[64] = {0};
+	char sHashcount[128] = {0};
 
 	if(ext_backend)
-		snprintf(sBackend, sizeof(sBackend), ",\"backend\":\"%s\"", xmrstak::iBackend::getName(bend->backendType));
+		snprintf(sBackend, sizeof(sBackend), ",\"backend\":\"%s\"", backend_name);
 
 	if(ext_hashcount)
-		snprintf(sHashcount, sizeof(sHashcount), ",\"hashcount\":%llu", int_port(bend->iHashCount.load(std::memory_order_relaxed)));
+		snprintf(sHashcount, sizeof(sHashcount), ",\"hashcount\":%llu,\"hashcount_total\":%llu", int_port(backend_hashcount), int_port(total_hashcount));
 
 	if(ext_algo)
-		snprintf(sAlgo, sizeof(sAlgo), ",\"algo\":\"%s\"", algo_full_cn ? "cryptonight" : "cryptonight-lite");
+	{
+		snprintf(sAlgo, sizeof(sAlgo), ",\"algo\":\"%s\"", algo.Name().c_str());
+		// the real algorithm with three degrees of freedom
+		snprintf(sBaseAlgo, sizeof(sBaseAlgo), ",\"base_algo\":\"%s\"", algo.BaseName().c_str());
+		snprintf(sIterations, sizeof(sIterations), ",\"iterations\":\"0x%08x\"", algo.Iter());
+		snprintf(sMemory, sizeof(sMemory), ",\"scratchpad\":\"0x%08x\"", (uint32_t)algo.Mem());
+		snprintf(sMemAlignBytes, sizeof(sMemAlignBytes), ",\"mask\":\"0x%08x\"", algo.Mask());
+	}
 
 	bin2hex((unsigned char*)&iNonce, 4, sNonce);
 	sNonce[8] = '\0';
@@ -621,22 +706,23 @@ bool jpsock::cmd_submit(const char* sJobId, uint32_t iNonce, const uint8_t* bRes
 	bin2hex(bResult, 32, sResult);
 	sResult[64] = '\0';
 
-	snprintf(cmd_buffer, sizeof(cmd_buffer), "{\"method\":\"submit\",\"params\":{\"id\":\"%s\",\"job_id\":\"%s\",\"nonce\":\"%s\",\"result\":\"%s\"%s%s%s},\"id\":1}\n",
-		sMinerId, sJobId, sNonce, sResult, sBackend, sHashcount, sAlgo);
+	snprintf(cmd_buffer, sizeof(cmd_buffer), "{\"method\":\"submit\",\"params\":{\"id\":\"%s\",\"job_id\":\"%s\",\"nonce\":\"%s\",\"result\":\"%s\"%s%s%s%s%s%s%s},\"id\":1}\n",
+		sMinerId, sJobId, sNonce, sResult, sBackend, sHashcount, sAlgo, sBaseAlgo, sIterations, sMemory, sMemAlignBytes);
 
+	uint64_t messageId = 0;
 	opq_json_val oResult(nullptr);
-	return cmd_ret_wait(cmd_buffer, oResult);
+	return cmd_ret_wait(cmd_buffer, oResult, messageId);
 }
 
 void jpsock::save_nonce(uint32_t nonce)
 {
-	std::unique_lock<std::mutex>(job_mutex);
+	std::unique_lock<std::mutex> lck(job_mutex);
 	oCurrentJob.iSavedNonce = nonce;
 }
 
 bool jpsock::get_current_job(pool_job& job)
 {
-	std::unique_lock<std::mutex>(job_mutex);
+	std::unique_lock<std::mutex> lck(job_mutex);
 
 	if(oCurrentJob.iWorkLen == 0)
 		return false;
@@ -647,10 +733,10 @@ bool jpsock::get_current_job(pool_job& job)
 
 bool jpsock::get_pool_motd(std::string& strin)
 {
-	if(!ext_motd) 
+	if(!ext_motd)
 		return false;
 
-	std::unique_lock<std::mutex>(motd_mutex);
+	std::unique_lock<std::mutex> lck(motd_mutex);
 	if(pool_motd.size() > 0)
 	{
 		strin.assign(pool_motd);
@@ -660,13 +746,13 @@ bool jpsock::get_pool_motd(std::string& strin)
 	return false;
 }
 
-inline unsigned char hf_hex2bin(char c, bool &err)
+inline unsigned char hf_hex2bin(char c, bool& err)
 {
-	if (c >= '0' && c <= '9')
+	if(c >= '0' && c <= '9')
 		return c - '0';
-	else if (c >= 'a' && c <= 'f')
+	else if(c >= 'a' && c <= 'f')
 		return c - 'a' + 0xA;
-	else if (c >= 'A' && c <= 'F')
+	else if(c >= 'A' && c <= 'F')
 		return c - 'A' + 0xA;
 
 	err = true;
@@ -676,17 +762,18 @@ inline unsigned char hf_hex2bin(char c, bool &err)
 bool jpsock::hex2bin(const char* in, unsigned int len, unsigned char* out)
 {
 	bool error = false;
-	for (unsigned int i = 0; i < len; i += 2)
+	for(unsigned int i = 0; i < len; i += 2)
 	{
 		out[i / 2] = (hf_hex2bin(in[i], error) << 4) | hf_hex2bin(in[i + 1], error);
-		if (error) return false;
+		if(error)
+			return false;
 	}
 	return true;
 }
 
 inline char hf_bin2hex(unsigned char c)
 {
-	if (c <= 0x9)
+	if(c <= 0x9)
 		return '0' + c;
 	else
 		return 'a' - 0xA + c;
@@ -694,7 +781,7 @@ inline char hf_bin2hex(unsigned char c)
 
 void jpsock::bin2hex(const unsigned char* in, unsigned int len, char* out)
 {
-	for (unsigned int i = 0; i < len; i++)
+	for(unsigned int i = 0; i < len; i++)
 	{
 		out[i * 2] = hf_bin2hex((in[i] & 0xF0) >> 4);
 		out[i * 2 + 1] = hf_bin2hex(in[i] & 0x0F);

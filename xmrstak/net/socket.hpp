@@ -1,22 +1,26 @@
 #pragma once
 
 #include "socks.hpp"
+#include <atomic>
 
 class jpsock;
 
 class base_socket
 {
-public:
+  public:
 	virtual bool set_hostname(const char* sAddr) = 0;
 	virtual bool connect() = 0;
 	virtual int recv(char* buf, unsigned int len) = 0;
 	virtual bool send(const char* buf) = 0;
 	virtual void close(bool free) = 0;
+
+  protected:
+	std::atomic<bool> sock_closed;
 };
 
 class plain_socket : public base_socket
 {
-public:
+  public:
 	plain_socket(jpsock* err_callback);
 
 	bool set_hostname(const char* sAddr);
@@ -25,10 +29,10 @@ public:
 	bool send(const char* buf);
 	void close(bool free);
 
-private:
+  private:
 	jpsock* pCallback;
-	addrinfo *pSockAddr;
-	addrinfo *pAddrRoot;
+	addrinfo* pSockAddr;
+	addrinfo* pAddrRoot;
 	SOCKET hSocket;
 };
 
@@ -38,7 +42,7 @@ typedef struct ssl_st SSL;
 
 class tls_socket : public base_socket
 {
-public:
+  public:
 	tls_socket(jpsock* err_callback);
 
 	bool set_hostname(const char* sAddr);
@@ -47,7 +51,7 @@ public:
 	bool send(const char* buf);
 	void close(bool free);
 
-private:
+  private:
 	void init_ctx();
 	void print_error();
 

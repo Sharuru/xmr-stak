@@ -26,16 +26,15 @@
 
 #include "xmrstak/misc/console.hpp"
 #include "xmrstak/misc/jext.hpp"
-#include "xmrstak/misc/console.hpp"
 #include "xmrstak/misc/utility.hpp"
 
+#include <algorithm>
+#include <math.h>
+#include <numeric>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
 #include <vector>
-#include <numeric>
-#include <algorithm>
 
 #ifdef _WIN32
 #define strcasecmp _stricmp
@@ -44,18 +43,34 @@
 #include <cpuid.h>
 #endif
 
-
 using namespace rapidjson;
 
 /*
  * This enum needs to match index in oConfigValues, otherwise we will get a runtime error
  */
-enum configEnum {
-	aPoolList, bTlsSecureAlgo, sCurrency, iCallTimeout, iNetRetry, iGiveUpLimit, iVerboseLevel, bPrintMotd, iAutohashTime, 
-	bFlushStdout, bDaemonMode, sOutputFile, iHttpdPort, sHttpLogin, sHttpPass, bPreferIpv4, bAesOverride, sUseSlowMem 
+enum configEnum
+{
+	aPoolList,
+	sCurrency,
+	bTlsSecureAlgo,
+	iCallTimeout,
+	iNetRetry,
+	iGiveUpLimit,
+	iVerboseLevel,
+	bPrintMotd,
+	iAutohashTime,
+	bDaemonMode,
+	sOutputFile,
+	iHttpdPort,
+	sHttpLogin,
+	sHttpPass,
+	bPreferIpv4,
+	bAesOverride,
+	sUseSlowMem
 };
 
-struct configVal {
+struct configVal
+{
 	configEnum iName;
 	const char* sName;
 	Type iType;
@@ -64,27 +79,61 @@ struct configVal {
 // Same order as in configEnum, as per comment above
 // kNullType means any type
 configVal oConfigValues[] = {
-	{ aPoolList, "pool_list", kArrayType },
-	{ bTlsSecureAlgo, "tls_secure_algo", kTrueType },
-	{ sCurrency, "currency", kStringType },
-	{ iCallTimeout, "call_timeout", kNumberType },
-	{ iNetRetry, "retry_time", kNumberType },
-	{ iGiveUpLimit, "giveup_limit", kNumberType },
-	{ iVerboseLevel, "verbose_level", kNumberType },
-	{ bPrintMotd, "print_motd", kTrueType },
-	{ iAutohashTime, "h_print_time", kNumberType },
-	{ bFlushStdout, "flush_stdout", kTrueType},
-	{ bDaemonMode, "daemon_mode", kTrueType },
-	{ sOutputFile, "output_file", kStringType },
-	{ iHttpdPort, "httpd_port", kNumberType },
-	{ sHttpLogin, "http_login", kStringType },
-	{ sHttpPass, "http_pass", kStringType },
-	{ bPreferIpv4, "prefer_ipv4", kTrueType },
-	{ bAesOverride, "aes_override", kNullType },
-	{ sUseSlowMem, "use_slow_memory", kStringType }
-};
+	{aPoolList, "pool_list", kArrayType},
+	{sCurrency, "currency", kStringType},
+	{bTlsSecureAlgo, "tls_secure_algo", kTrueType},
+	{iCallTimeout, "call_timeout", kNumberType},
+	{iNetRetry, "retry_time", kNumberType},
+	{iGiveUpLimit, "giveup_limit", kNumberType},
+	{iVerboseLevel, "verbose_level", kNumberType},
+	{bPrintMotd, "print_motd", kTrueType},
+	{iAutohashTime, "h_print_time", kNumberType},
+	{bDaemonMode, "daemon_mode", kTrueType},
+	{sOutputFile, "output_file", kStringType},
+	{iHttpdPort, "httpd_port", kNumberType},
+	{sHttpLogin, "http_login", kStringType},
+	{sHttpPass, "http_pass", kStringType},
+	{bPreferIpv4, "prefer_ipv4", kTrueType},
+	{bAesOverride, "aes_override", kNullType},
+	{sUseSlowMem, "use_slow_memory", kStringType}};
 
-constexpr size_t iConfigCnt = (sizeof(oConfigValues)/sizeof(oConfigValues[0]));
+constexpr size_t iConfigCnt = (sizeof(oConfigValues) / sizeof(oConfigValues[0]));
+
+xmrstak::coin_selection coins[] = {
+	// name, userpool, devpool, default_pool_suggestion
+	{"bbscoin", {POW(cryptonight_aeon)}, {POW(cryptonight_aeon)}, nullptr},
+	{"bittube", {POW(cryptonight_bittube2)}, {POW(cryptonight_gpu)}, "mining.bit.tube:13333"},
+	{"cryptonight", {POW(cryptonight)}, {POW(cryptonight_gpu)}, nullptr},
+	{"cryptonight_bittube2", {POW(cryptonight_bittube2)}, {POW(cryptonight_gpu)}, nullptr},
+	{"cryptonight_masari", {POW(cryptonight_masari)}, {POW(cryptonight_gpu)}, nullptr},
+	{"cryptonight_haven", {POW(cryptonight_haven)}, {POW(cryptonight_gpu)}, nullptr},
+	{"cryptonight_heavy", {POW(cryptonight_heavy)}, {POW(cryptonight_gpu)}, nullptr},
+	{"cryptonight_lite", {POW(cryptonight_lite)}, {POW(cryptonight_aeon)}, nullptr},
+	{"cryptonight_lite_v7", {POW(cryptonight_aeon)}, {POW(cryptonight_aeon)}, nullptr},
+	{"cryptonight_lite_v7_xor", {POW(cryptonight_ipbc)}, {POW(cryptonight_aeon)}, nullptr},
+	{"cryptonight_r", {POW(cryptonight_r)}, {POW(cryptonight_r)}, nullptr},
+	{"cryptonight_superfast", {POW(cryptonight_superfast)}, {POW(cryptonight_gpu)}, nullptr},
+	{"cryptonight_turtle", {POW(cryptonight_turtle)}, {POW(cryptonight_turtle)}, nullptr},
+	{"cryptonight_v7", {POW(cryptonight_monero)}, {POW(cryptonight_gpu)}, nullptr},
+	{"cryptonight_v8", {POW(cryptonight_monero_v8)}, {POW(cryptonight_r)}, nullptr},
+	{"cryptonight_v8_double", {POW(cryptonight_v8_double)}, {POW(cryptonight_gpu)}, nullptr},
+	{"cryptonight_v8_half", {POW(cryptonight_v8_half)}, {POW(cryptonight_gpu)}, nullptr},
+	{"cryptonight_v8_reversewaltz", {POW(cryptonight_v8_reversewaltz)}, {POW(cryptonight_gpu)}, nullptr},
+	{"cryptonight_v8_zelerius", {POW(cryptonight_v8_zelerius)}, {POW(cryptonight_gpu)}, nullptr},
+	{"cryptonight_v7_stellite", {POW(cryptonight_stellite)}, {POW(cryptonight_gpu)}, nullptr},
+	{"cryptonight_gpu", {POW(cryptonight_gpu)}, {POW(cryptonight_gpu)}, "pool.ryo-currency.com:3333"},
+	{"cryptonight_conceal", {POW(cryptonight_conceal)}, {POW(cryptonight_gpu)}, nullptr},
+	{"graft", {POW(cryptonight_v8_reversewaltz), 12, POW(cryptonight_monero_v8)}, {POW(cryptonight_gpu)}, nullptr},
+	{"haven", {POW(cryptonight_haven)}, {POW(cryptonight_gpu)}, nullptr},
+	{"lethean", {POW(cryptonight_r)}, {POW(cryptonight_r)}, nullptr},
+	{"masari", {POW(cryptonight_v8_half)}, {POW(cryptonight_gpu)}, nullptr},
+	{"qrl", {POW(cryptonight_monero)}, {POW(cryptonight_gpu)}, nullptr},
+	{"ryo", {POW(cryptonight_gpu)}, {POW(cryptonight_gpu)}, "pool.ryo-currency.com:3333"},
+	{"torque", {POW(cryptonight_v8_half)}, {POW(cryptonight_gpu)}, nullptr},
+	{"plenteum", {POW(cryptonight_turtle)}, {POW(cryptonight_turtle)}, nullptr},
+	{"zelerius", {POW(cryptonight_v8_zelerius), 7, POW(cryptonight_monero_v8)}, {POW(cryptonight_gpu)}, nullptr}};
+
+constexpr size_t coin_algo_size = (sizeof(coins) / sizeof(coins[0]));
 
 inline bool checkType(Type have, Type want)
 {
@@ -103,6 +152,7 @@ inline bool checkType(Type have, Type want)
 struct jconf::opaque_private
 {
 	Document jsonDoc;
+	Document jsonDocPools;
 	const Value* configValues[iConfigCnt]; //Compile time constant
 
 	opaque_private()
@@ -129,12 +179,13 @@ bool jconf::GetPoolConfig(size_t id, pool_cfg& cfg)
 		return false;
 
 	typedef const Value* cval;
-	cval jaddr, jlogin, jpasswd, jnicehash, jtls, jtlsfp, jwt;
+	cval jaddr, jlogin, jrigid, jpasswd, jnicehash, jtls, jtlsfp, jwt;
 	const Value& oThdConf = prv->configValues[aPoolList]->GetArray()[id];
 
 	/* We already checked presence and types */
 	jaddr = GetObjectMember(oThdConf, "pool_address");
 	jlogin = GetObjectMember(oThdConf, "wallet_address");
+	jrigid = GetObjectMember(oThdConf, "rig_id");
 	jpasswd = GetObjectMember(oThdConf, "pool_password");
 	jnicehash = GetObjectMember(oThdConf, "use_nicehash");
 	jtls = GetObjectMember(oThdConf, "use_tls");
@@ -143,6 +194,7 @@ bool jconf::GetPoolConfig(size_t id, pool_cfg& cfg)
 
 	cfg.sPoolAddr = jaddr->GetString();
 	cfg.sWalletAddr = jlogin->GetString();
+	cfg.sRigId = jrigid->GetString();
 	cfg.sPasswd = jpasswd->GetString();
 	cfg.nicehash = jnicehash->GetBool();
 	cfg.tls = jtls->GetBool();
@@ -164,45 +216,6 @@ bool jconf::GetPoolConfig(size_t id, pool_cfg& cfg)
 bool jconf::TlsSecureAlgos()
 {
 	return prv->configValues[bTlsSecureAlgo]->GetBool();
-}
-
-const std::string jconf::GetCurrency()
-{
-	auto& currency = xmrstak::params::inst().currency;
-	if(currency.empty())
-		currency = prv->configValues[sCurrency]->GetString();
-	if(
-#ifndef CONF_NO_MONERO
-			// if monero is disabled at compile time, enable error message if selected currency is `monero`
-			!xmrstak::strcmp_i(currency, "monero")
-#else
-			true
-#endif
-			&&
-#ifndef CONF_NO_AEON
-			// if aeon is disabled at compile time, enable error message if selected currency is `aeon`
-			!xmrstak::strcmp_i(currency, "aeon")
-#else
-			true
-#endif
-	)
-	{
-		printer::inst()->print_msg(L0, "ERROR: Wrong currency selected - '%s'.", currency.c_str());
-		win_exit();
-	}
-	return currency;
-}
-
-bool jconf::IsCurrencyMonero()
-{
-	if(xmrstak::strcmp_i(GetCurrency(), "monero"))
-	{
-		return true;
-	}
-	else
-	{
-		return false;
-	}
 }
 
 bool jconf::PreferIpv4()
@@ -237,12 +250,18 @@ bool jconf::PrintMotd()
 
 uint64_t jconf::GetAutohashTime()
 {
-	return prv->configValues[iAutohashTime]->GetUint64();
+	if (xmrstak::params::inst().h_print_time == -1)
+		return prv->configValues[iAutohashTime]->GetUint64();
+	else
+		return uint64_t(xmrstak::params::inst().h_print_time);
 }
 
 uint16_t jconf::GetHttpdPort()
 {
-	return prv->configValues[iHttpdPort]->GetUint();
+	if(xmrstak::params::inst().httpd_port == xmrstak::params::httpd_port_unset)
+		return prv->configValues[iHttpdPort]->GetUint();
+	else
+		return uint16_t(xmrstak::params::inst().httpd_port);
 }
 
 const char* jconf::GetHttpUsername()
@@ -262,12 +281,15 @@ bool jconf::DaemonMode()
 
 const char* jconf::GetOutputFile()
 {
-	return prv->configValues[sOutputFile]->GetString();
+	if(xmrstak::params::inst().outputFile.length() > 0)
+		return xmrstak::params::inst().outputFile.c_str();
+	else
+		return prv->configValues[sOutputFile]->GetString();
 }
 
 void jconf::cpuid(uint32_t eax, int32_t ecx, int32_t val[4])
 {
-	memset(val, 0, sizeof(int32_t)*4);
+	memset(val, 0, sizeof(int32_t) * 4);
 
 #ifdef _WIN32
 	__cpuidex(val, eax, ecx);
@@ -307,30 +329,73 @@ jconf::slow_mem_cfg jconf::GetSlowMemSetting()
 		return unknown_value;
 }
 
-bool jconf::parse_config(const char* sFilename)
+std::string jconf::GetMiningCoin()
 {
-	FILE * pFile;
-	char * buffer;
-	size_t flen;
+	if(xmrstak::params::inst().currency.length() > 0)
+		return xmrstak::params::inst().currency;
+	else
+		return prv->configValues[sCurrency]->GetString();
+}
 
-	if(!check_cpu_features())
+void jconf::GetAlgoList(std::string& list)
+{
+	list.reserve(256);
+	for(size_t i = 0; i < coin_algo_size; i++)
 	{
-		printer::inst()->print_msg(L0, "CPU support of SSE2 is required.");
-		return false;
+		list += "\t- ";
+		list += coins[i].coin_name;
+		list += "\n";
+	}
+}
+
+bool jconf::IsOnAlgoList(std::string& needle)
+{
+	std::transform(needle.begin(), needle.end(), needle.begin(), ::tolower);
+
+	for(size_t i = 0; i < coin_algo_size; i++)
+	{
+		if(needle == coins[i].coin_name)
+			return true;
+	}
+	return false;
+}
+
+const char* jconf::GetDefaultPool(const char* needle)
+{
+	const char* default_example = "pool.example.com:3333";
+
+	for(size_t i = 0; i < coin_algo_size; i++)
+	{
+		if(strcmp(needle, coins[i].coin_name) == 0)
+		{
+			if(coins[i].default_pool != nullptr)
+				return coins[i].default_pool;
+			else
+				return default_example;
+		}
 	}
 
+	return default_example;
+}
+
+bool jconf::parse_file(const char* sFilename, bool main_conf)
+{
+	FILE* pFile;
+	char* buffer;
+	size_t flen;
+
 	pFile = fopen(sFilename, "rb");
-	if (pFile == NULL)
+	if(pFile == NULL)
 	{
 		printer::inst()->print_msg(L0, "Failed to open config file %s.", sFilename);
 		return false;
 	}
 
-	fseek(pFile,0,SEEK_END);
+	fseek(pFile, 0, SEEK_END);
 	flen = ftell(pFile);
 	rewind(pFile);
 
-	if(flen >= 64*1024)
+	if(flen >= 64 * 1024)
 	{
 		fclose(pFile);
 		printer::inst()->print_msg(L0, "Oversized config file - %s.", sFilename);
@@ -345,7 +410,7 @@ bool jconf::parse_config(const char* sFilename)
 	}
 
 	buffer = (char*)malloc(flen + 3);
-	if(fread(buffer+1, flen, 1, pFile) != 1)
+	if(fread(buffer + 1, flen, 1, pFile) != 1)
 	{
 		free(buffer);
 		fclose(pFile);
@@ -367,45 +432,91 @@ bool jconf::parse_config(const char* sFilename)
 	buffer[flen] = '}';
 	buffer[flen + 1] = '\0';
 
-	prv->jsonDoc.Parse<kParseCommentsFlag|kParseTrailingCommasFlag>(buffer, flen+2);
+	Document& root = main_conf ? prv->jsonDoc : prv->jsonDocPools;
+
+	root.Parse<kParseCommentsFlag | kParseTrailingCommasFlag>(buffer, flen + 2);
 	free(buffer);
 
-	if(prv->jsonDoc.HasParseError())
+	if(root.HasParseError())
 	{
-		printer::inst()->print_msg(L0, "JSON config parse error(offset %llu): %s",
-			int_port(prv->jsonDoc.GetErrorOffset()), GetParseError_En(prv->jsonDoc.GetParseError()));
+		printer::inst()->print_msg(L0, "JSON config parse error in '%s' (offset %llu): %s",
+			sFilename, int_port(root.GetErrorOffset()), GetParseError_En(root.GetParseError()));
 		return false;
 	}
 
-
-	if(!prv->jsonDoc.IsObject())
+	if(!root.IsObject())
 	{ //This should never happen as we created the root ourselves
-		printer::inst()->print_msg(L0, "Invalid config file. No root?\n");
+		printer::inst()->print_msg(L0, "Invalid config file '%s'. No root?", sFilename);
 		return false;
 	}
 
-	for(size_t i = 0; i < iConfigCnt; i++)
+	if(main_conf)
 	{
-		if(oConfigValues[i].iName != i)
+		for(size_t i = 2; i < iConfigCnt; i++)
 		{
-			printer::inst()->print_msg(L0, "Code error. oConfigValues are not in order.");
-			return false;
-		}
+			if(oConfigValues[i].iName != i)
+			{
+				printer::inst()->print_msg(L0, "Code error. oConfigValues are not in order.");
+				return false;
+			}
 
-		prv->configValues[i] = GetObjectMember(prv->jsonDoc, oConfigValues[i].sName);
+			prv->configValues[i] = GetObjectMember(root, oConfigValues[i].sName);
 
-		if(prv->configValues[i] == nullptr)
-		{
-			printer::inst()->print_msg(L0, "Invalid config file. Missing value \"%s\".", oConfigValues[i].sName);
-			return false;
-		}
+			if(prv->configValues[i] == nullptr)
+			{
+				printer::inst()->print_msg(L0, "Invalid config file '%s'. Missing value \"%s\".", sFilename, oConfigValues[i].sName);
+				return false;
+			}
 
-		if(!checkType(prv->configValues[i]->GetType(), oConfigValues[i].iType))
-		{
-			printer::inst()->print_msg(L0, "Invalid config file. Value \"%s\" has unexpected type.", oConfigValues[i].sName);
-			return false;
+			if(!checkType(prv->configValues[i]->GetType(), oConfigValues[i].iType))
+			{
+				printer::inst()->print_msg(L0, "Invalid config file '%s'. Value \"%s\" has unexpected type.", sFilename, oConfigValues[i].sName);
+				return false;
+			}
 		}
 	}
+	else
+	{
+		for(size_t i = 0; i < 2; i++)
+		{
+			if(oConfigValues[i].iName != i)
+			{
+				printer::inst()->print_msg(L0, "Code error. oConfigValues are not in order.");
+				return false;
+			}
+
+			prv->configValues[i] = GetObjectMember(root, oConfigValues[i].sName);
+
+			if(prv->configValues[i] == nullptr)
+			{
+				printer::inst()->print_msg(L0, "Invalid config file '%s'. Missing value \"%s\".", sFilename, oConfigValues[i].sName);
+				return false;
+			}
+
+			if(!checkType(prv->configValues[i]->GetType(), oConfigValues[i].iType))
+			{
+				printer::inst()->print_msg(L0, "Invalid config file '%s'. Value \"%s\" has unexpected type.", sFilename, oConfigValues[i].sName);
+				return false;
+			}
+		}
+	}
+
+	return true;
+}
+
+bool jconf::parse_config(const char* sFilename, const char* sFilenamePools)
+{
+	if(!check_cpu_features())
+	{
+		printer::inst()->print_msg(L0, "CPU support of SSE2 is required.");
+		return false;
+	}
+
+	if(!parse_file(sFilename, true))
+		return false;
+
+	if(!parse_file(sFilenamePools, false))
+		return false;
 
 	size_t pool_cnt = prv->configValues[aPoolList]->Size();
 	if(pool_cnt == 0)
@@ -417,21 +528,21 @@ bool jconf::parse_config(const char* sFilename)
 	std::vector<size_t> pool_weights;
 	pool_weights.reserve(pool_cnt);
 
-	const char* aPoolValues[] = { "pool_address", "wallet_address", "pool_password", "use_nicehash", "use_tls", "tls_fingerprint", "pool_weight" };
-	Type poolValTypes[] = { kStringType, kStringType, kStringType, kTrueType, kTrueType, kStringType, kNumberType };
+	const char* aPoolValues[] = {"pool_address", "wallet_address", "rig_id", "pool_password", "use_nicehash", "use_tls", "tls_fingerprint", "pool_weight"};
+	Type poolValTypes[] = {kStringType, kStringType, kStringType, kStringType, kTrueType, kTrueType, kStringType, kNumberType};
 
-	constexpr size_t pvcnt = sizeof(aPoolValues)/sizeof(aPoolValues[0]);
-	for(uint32_t i=0; i < pool_cnt; i++)
+	constexpr size_t pvcnt = sizeof(aPoolValues) / sizeof(aPoolValues[0]);
+	for(uint32_t i = 0; i < pool_cnt; i++)
 	{
 		const Value& oThdConf = prv->configValues[aPoolList]->GetArray()[i];
-		
+
 		if(!oThdConf.IsObject())
 		{
 			printer::inst()->print_msg(L0, "Invalid config file. pool_list must contain objects.");
 			return false;
 		}
 
-		for(uint32_t j=0; j < pvcnt; j++)
+		for(uint32_t j = 0; j < pvcnt; j++)
 		{
 			const Value* v;
 			if((v = GetObjectMember(oThdConf, aPoolValues[j])) == nullptr)
@@ -514,14 +625,30 @@ bool jconf::parse_config(const char* sFilename)
 	}
 #endif // _WIN32
 
-	if (prv->configValues[bFlushStdout]->IsBool())
+	std::string ctmp = GetMiningCoin();
+	std::transform(ctmp.begin(), ctmp.end(), ctmp.begin(), ::tolower);
+
+	if(ctmp.length() == 0)
 	{
-		bool bflush = prv->configValues[bFlushStdout]->GetBool();
-		printer::inst()->set_flush_stdout(bflush);
-		if (bflush)
+		printer::inst()->print_msg(L0, "You need to specify the coin that you want to mine.");
+		return false;
+	}
+
+	for(size_t i = 0; i < coin_algo_size; i++)
+	{
+		if(ctmp == coins[i].coin_name)
 		{
-			printer::inst()->print_msg(L0, "Flush stdout forced.");
+			currentCoin = coins[i];
+			break;
 		}
+	}
+
+	if(currentCoin.GetDescription(1).GetMiningAlgo() == invalid_algo)
+	{
+		std::string cl;
+		GetAlgoList(cl);
+		printer::inst()->print_msg(L0, "Unrecognised coin '%s', your options are:\n%s", ctmp.c_str(), cl.c_str());
+		return false;
 	}
 
 	return true;
